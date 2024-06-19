@@ -1,0 +1,195 @@
+import pandas as pd
+from datetime import datetime
+import read_raw
+
+# Enter desired year and month for auction data
+year = 2024
+month = 'JUL'
+
+# get month in 0padded numeric format, for file path compatibillity
+month_numeric = datetime.strptime(month, '%b').month
+month_numeric = "{:02d}".format(month_numeric)
+
+# file path to monthly auction data based on year and month
+file_path = f'\\\\pzpwcmfs01\\ca\\11_Transmission Analysis\\ERCOT\\06 - CRR\\Monthly\\{year}\\{year}-{month_numeric}\\Network Model\\'
+print(file_path)
+
+# Necessary files based on month and year
+sources_sinks_file = f'{year}.{month}.Monthly.Auction.SourcesAndSinks.csv'
+thermal_constraints_file = f'{year}.{month}.Monthly.Auction.Non-ThermalConstraints.csv'
+lines_and_transformers_file = f'{year}.{month}.Monthly.Auction.MonitoredLinesAndTransformers.csv'
+
+sources_sinks_df = pd.read_csv(file_path + sources_sinks_file)
+thermal_constraints_df = pd.read_csv(file_path + thermal_constraints_file)
+lines_and_transformers_df = pd.read_csv(file_path + lines_and_transformers_file)
+
+def format_row(row):
+    return ' '.join(map(str, row))
+
+def interface_elements_aux():
+    # Rows of .aux file will be saved here
+    rows = []
+    for _, row_df in thermal_constraints_df.iterrows():
+        interface_name = row_df['Name']
+        weight = (row_df[' FlowDirection'] == 'From-To') - (row_df[' FlowDirection'] == 'To-From')
+        element_type = row_df[' DeviceType']
+        meter_far = 'NO'
+        element_type_parts = row_df[' DeviceName'].split()
+
+        # Initialize lists to hold numbers if element is line, and mixed string if a transformer
+        numbers = []
+        strings = []
+
+        # Iterate through the parts of device and classify them
+        for part in element_type_parts:
+            # If part is completerly numeric, then save in numbers 
+            if part.isdigit():
+                numbers.append(part)
+            # else save in strings
+            else:
+                strings.append(part)
+
+        # Determine if element is a line, of xformer, and set description accordingly
+        if 'Line' in element_type:
+            description = f'BRANCH {numbers[0]} {numbers[1]} {numbers[2]}'
+        elif 'Trans' in element_type:
+            description = f'BRANCH {strings[0]} {strings[1]}'
+
+        # Lines in .aux file will be formatted "Interface Name"     "Description"   "Meter"     weight
+        row = f'"{interface_name+'"':<34}"{description+'"':<32}"{meter_far+' "':<7}{weight:6.2f}'
+        rows.append(row)
+
+    # create parts of .aux file
+    header = "InterfaceElement (InterfaceName,Element,MeterFar,Weight)\n{"
+    body = "\n".join(rows)
+    footer = "\n}"
+
+    # Combine all parts into complete .aux file content
+    aux_file_content = f"{header}\n{body}\n{footer}"
+
+    # Save to file
+    with open(file_path + f"interf{year}.{month}.aux", "w") as file:
+        file.write(aux_file_content)
+
+def interfacing_aux():
+    # Rows of .aux file will be saved here
+    rows = []
+    number = 0
+    for name in thermal_constraints_df['Name'].unique():
+        '''mon_direction = '"FROM -> TO"'
+        mwb_limit = '0.0'
+        mwc_limit = '0.0'''
+        number += 1
+        element_name = f'"{name}"'
+        limit_used = thermal_constraints_df.loc[thermal_constraints_df['Name'] == name][' Limit'].iloc[0]
+
+
+        # Lines in .aux file will be formatted "Interface Name"     "Description"   "Meter"     weight
+        row = f'{number} {element_name} {limit_used} {limit_used} 0.0 0.0 "FROM -> TO"'
+        rows.append(row)
+
+    # create parts of .aux file
+    header = "Interface (Number,Name,LimitUsed,LimitMWA,LimitMWB,LimitMWC,MonDirection)\n{"
+    body = "\n".join(rows)
+    footer = "}"
+
+    # Combine all parts into complete .aux file content
+    aux_file_content = f"{header}\n{body}\n{footer}"
+
+    # Save to file
+    with open(file_path + f"interfacerating{year}.{month}.aux", "w") as file:
+        file.write(aux_file_content)
+
+def parts_points_aux():
+    rows = []
+    columns = ['object', 'group name', 'auto calc method', 'part fact', 'auto calc']
+    for _, row_df in sources_sinks_df.iterrows():
+        
+        # Ignore non hubs for rn
+        if 'HB_' not in row_df['Name']:
+            continue
+        # Get necessary information (object, groupname, autoCalcMethod, PartFact, AutoCalc)
+        auto_calc = '"NO "'
+        auto_calc_method = '"SPECIFIED"'
+
+        bus_name_parts = row_df['BusName'].split()
+        object = f'"BUS \'{bus_name_parts[0]}\'"'
+        group_name = f'"{row_df['Name']}"'
+        participation = row_df['ParticipationFactor']
+
+        row = [object, group_name, auto_calc_method, participation, auto_calc]
+        rows.append(row)
+
+    parts_points_df = pd.DataFrame(rows, columns = columns)
+    grouped_hubs = parts_points_df.groupby('group name')['part fact'].sum().reset_index()
+    grouped_hubs = grouped_hubs.rename(columns = {'part fact' : 'hub sum'})
+
+    parts_points_df = parts_points_df.merge(grouped_hubs, on= 'group name')
+
+    #print(parts_points_df)
+    parts_points_df['part fact'] = parts_points_df.apply(lambda row: f"{row['part fact'] / row['hub sum']: .3g}", axis=1)
+    parts_points_df.drop('hub sum', axis=1, inplace=True)
+
+    formatted_rows_list = parts_points_df.apply(format_row, axis=1).tolist()
+
+    # create parts of .aux file
+    header = "PartPoint (Object,GroupName,AutoCalcMethod,PartFact,AutoCalc)\n{"
+    body = "\n".join(formatted_rows_list)
+    footer = "\n}"
+
+    # Combine all parts into complete .aux file content
+    aux_file_content = f"{header}\n{body}\n{footer}"
+
+    # Save to file
+    with open(file_path + f"injpt{year}.{month}.aux", "w") as file:
+        file.write(aux_file_content)
+
+def loads_aux():
+    loads_df = read_raw.parse_raw_load_data(file_path)
+
+    rows = []
+    for _, row_df in sources_sinks_df.iterrows():
+        
+        # Ignore non lz for rn
+        if 'LZ_' not in row_df['Name']:
+            continue
+        # Get necessary information (object, groupname, autoCalcMethod, PartFact, AutoCalc)
+        auto_calc = '"NO "'
+        auto_calc_method = '"LOAD MW"'
+
+        bus_name_parts = row_df['BusName'].split()
+        load_name = bus_name_parts[-1]
+
+        if load_name in loads_df.index:
+            bus_num = loads_df.loc[load_name, 'Bus ID']
+            load_num = loads_df.loc[load_name, 'Load ID']
+        else:
+            #print(load_name)
+            bus_num = [bus_name_parts[0]]
+            load_num = [1]
+
+        for bus_id, load_id in zip(bus_num, load_num):
+            object = f'"LOAD \'{bus_id}\' \'{load_id}\'"'
+            group_name = f'"{row_df['Name']}"'
+            participation = row_df['ParticipationFactor']
+
+            row = f'{object} {group_name} {auto_calc_method} {participation} {auto_calc}'
+            rows.append(row)
+
+    # create parts of .aux file
+    header = "PartPoint (Object,GroupName,AutoCalcMethod,PartFact,AutoCalc)\n{"
+    body = "\n".join(rows)
+    footer = "\n}"
+
+    # Combine all parts into complete .aux file content
+    aux_file_content = f"{header}\n{body}\n{footer}"
+
+    # Save to file
+    with open(file_path + f"loads{year}.{month}.aux", "w") as file:
+        file.write(aux_file_content)
+
+
+interface_elements_aux()
+parts_points_aux()
+loads_aux()
+interfacing_aux()
